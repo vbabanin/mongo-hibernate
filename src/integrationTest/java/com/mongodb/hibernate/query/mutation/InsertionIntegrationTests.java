@@ -19,11 +19,13 @@ package com.mongodb.hibernate.query.mutation;
 import com.mongodb.client.MongoCollection;
 import com.mongodb.hibernate.junit.InjectMongoCollection;
 import com.mongodb.hibernate.query.Book;
-import java.util.List;
 import org.bson.BsonDocument;
+import org.hibernate.exception.ConstraintViolationException;
 import org.hibernate.testing.orm.junit.DomainModel;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+
+import java.util.List;
 
 @DomainModel(annotatedClasses = Book.class)
 class InsertionIntegrationTests extends AbstractMutationQueryIntegrationTests {
@@ -74,6 +76,27 @@ class InsertionIntegrationTests extends AbstractMutationQueryIntegrationTests {
                                 """)));
         assertExpectedAffectedCollections(Book.COLLECTION);
     }
+
+    @Test
+    void testDuplication() {
+        assertMutationQueryFailure("""
+                        insert into Book (id, title, outOfStock, publishYear, isbn13, discount, price)
+                             values
+                                 (5, 'Pride & Prejudice', false, 1813, 9780141439518L, 0.2D, 23.55BD),
+                                 (5, 'Pride & Prejudice', false, 1813, 9780141439518L, 0.2D, 23.55BD)
+                        """,
+                null,
+                ConstraintViolationException.class, """
+                        JDBC exception executing SQL [{"insert": "books", "documents": [{"_id": {"$numberInt": "5"}, "title": \
+                        "Pride & Prejudice", "outOfStock": false, "publishYear": {"$numberInt": "1813"}, "isbn13": {"$numberLong": \
+                        "9780141439518"}, "discount": {"$numberDouble": "0.2"}, "price": {"$numberDecimal": "23.55"}}, {"_id": \
+                        {"$numberInt": "5"}, "title": "Pride & Prejudice", "outOfStock": false, "publishYear": {"$numberInt": "1813"}, \
+                        "isbn13": {"$numberLong": "9780141439518"}, "discount": {"$numberDouble": "0.2"}, "price": {"$numberDecimal": \
+                        "23.55"}}], "ordered": false}] [Duplicate key error: E11000 duplicate key error collection: \
+                        mongo-hibernate-test.books index: _id_ dup key: { _id: 5 }] [n/a]\
+                        """);
+    }
+
 
     @Test
     void testInsertMultipleDocuments() {

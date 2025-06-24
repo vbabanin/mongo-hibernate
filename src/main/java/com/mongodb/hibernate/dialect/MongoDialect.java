@@ -16,9 +16,6 @@
 
 package com.mongodb.hibernate.dialect;
 
-import static com.mongodb.hibernate.internal.MongoConstants.MONGO_DBMS_NAME;
-import static java.lang.String.format;
-
 import com.mongodb.hibernate.internal.translate.MongoTranslatorFactory;
 import com.mongodb.hibernate.internal.type.MongoStructJdbcType;
 import com.mongodb.hibernate.internal.type.ObjectIdJavaType;
@@ -29,9 +26,15 @@ import org.hibernate.dialect.DatabaseVersion;
 import org.hibernate.dialect.Dialect;
 import org.hibernate.dialect.aggregate.AggregateSupport;
 import org.hibernate.engine.jdbc.dialect.spi.DialectResolutionInfo;
+import org.hibernate.exception.ConstraintViolationException;
+import org.hibernate.exception.spi.SQLExceptionConversionDelegate;
+import org.hibernate.internal.util.JdbcExceptionHelper;
 import org.hibernate.service.ServiceRegistry;
 import org.hibernate.sql.ast.SqlAstTranslatorFactory;
 import org.jspecify.annotations.Nullable;
+
+import static com.mongodb.hibernate.internal.MongoConstants.MONGO_DBMS_NAME;
+import static java.lang.String.format;
 
 /**
  * A MongoDB {@link Dialect} for {@linkplain #getMinimumSupportedVersion() version 6.0 and above}. Must be used together
@@ -62,6 +65,20 @@ public final class MongoDialect extends Dialect {
         throw new RuntimeException(format(
                 "Could not instantiate [%s], see the earlier exceptions to find out why",
                 MongoDialect.class.getName()));
+    }
+
+    @Override
+    public SQLExceptionConversionDelegate buildSQLExceptionConversionDelegate() {
+        return (sqlException, message, sql) -> {
+            final String constraintName;
+            switch (JdbcExceptionHelper.extractErrorCode(sqlException)) {
+                case 11000:
+                    constraintName = getViolatedConstraintNameExtractor().extractConstraintName(sqlException);
+                    return new ConstraintViolationException(message, sqlException, sql, constraintName);
+                default:
+                    return null;
+            }
+        };
     }
 
     @Override

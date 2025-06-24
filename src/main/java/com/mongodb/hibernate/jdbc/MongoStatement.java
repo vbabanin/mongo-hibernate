@@ -16,15 +16,15 @@
 
 package com.mongodb.hibernate.jdbc;
 
-import static com.mongodb.hibernate.internal.MongoConstants.ID_FIELD_NAME;
-import static com.mongodb.hibernate.internal.VisibleForTesting.AccessModifier.PRIVATE;
-import static java.lang.String.format;
-import static java.util.stream.Collectors.toCollection;
-
 import com.mongodb.client.ClientSession;
 import com.mongodb.client.MongoDatabase;
 import com.mongodb.hibernate.internal.FeatureNotSupportedException;
 import com.mongodb.hibernate.internal.VisibleForTesting;
+import org.bson.BsonDocument;
+import org.bson.BsonValue;
+import org.bson.Document;
+import org.jspecify.annotations.Nullable;
+
 import java.sql.Connection;
 import java.sql.ResultSet;
 import java.sql.SQLException;
@@ -32,11 +32,14 @@ import java.sql.SQLFeatureNotSupportedException;
 import java.sql.SQLSyntaxErrorException;
 import java.sql.SQLWarning;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
 import java.util.Map;
-import org.bson.BsonDocument;
-import org.bson.BsonValue;
-import org.jspecify.annotations.Nullable;
+
+import static com.mongodb.hibernate.internal.MongoConstants.ID_FIELD_NAME;
+import static com.mongodb.hibernate.internal.VisibleForTesting.AccessModifier.PRIVATE;
+import static java.lang.String.format;
+import static java.util.stream.Collectors.toCollection;
 
 class MongoStatement implements StatementAdapter {
 
@@ -128,7 +131,29 @@ class MongoStatement implements StatementAdapter {
     int executeUpdateCommand(BsonDocument command) throws SQLException {
         try {
             startTransactionIfNeeded();
-            return mongoDatabase.runCommand(clientSession, command).getInteger("n");
+            Document document = mongoDatabase.runCommand(clientSession, command);
+            Integer n = document.getInteger("n");
+
+            List<Document> writeErrors = mongoDatabase
+                    .runCommand(command).getList("writeErrors",
+                            Document.class,
+                            Collections.emptyList());
+
+            if (writeErrors.size() > 1) {
+                // TODO
+                throw new FeatureNotSupportedException("Multiple write errors occurred: " + writeErrors);
+            }
+
+            if (!writeErrors.isEmpty()) {
+                Document error = writeErrors.get(0);
+                Integer code = error.getInteger("code");
+                if (11000 == code) {
+                    // Duplicate key error
+                    throw new SQLException("Duplicate key error: " + error.getString("errmsg"), "", 11000);
+                }
+                throw new SQLException("Unknown code error: " + error.getString("errmsg"), "", code);
+            }
+            return n;
         } catch (RuntimeException e) {
             throw new SQLException("Failed to execute update command", e);
         }

@@ -16,14 +16,9 @@
 
 package com.mongodb.hibernate.query;
 
-import static com.mongodb.hibernate.MongoTestAssertions.assertIterableEq;
-import static org.assertj.core.api.Assertions.assertThat;
-import static org.assertj.core.api.Assertions.assertThatThrownBy;
-
 import com.mongodb.client.MongoCollection;
 import com.mongodb.hibernate.TestCommandListener;
 import com.mongodb.hibernate.junit.MongoExtension;
-import java.util.function.Consumer;
 import org.assertj.core.api.InstanceOfAssertFactories;
 import org.bson.BsonDocument;
 import org.hibernate.query.MutationQuery;
@@ -34,6 +29,12 @@ import org.hibernate.testing.orm.junit.SessionFactory;
 import org.hibernate.testing.orm.junit.SessionFactoryScope;
 import org.hibernate.testing.orm.junit.SessionFactoryScopeAware;
 import org.junit.jupiter.api.extension.ExtendWith;
+
+import java.util.function.Consumer;
+
+import static com.mongodb.hibernate.MongoTestAssertions.assertIterableEq;
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 @SessionFactory(exportSchema = false)
 @ExtendWith(MongoExtension.class)
@@ -140,6 +141,8 @@ public abstract class AbstractQueryIntegrationTests implements SessionFactorySco
     protected void assertActualCommand(BsonDocument expectedCommand) {
         var capturedCommands = testCommandListener.getStartedCommands();
 
+        System.err.println(capturedCommands);
+        System.err.println(expectedCommand);
         assertThat(capturedCommands)
                 .singleElement()
                 .asInstanceOf(InstanceOfAssertFactories.MAP)
@@ -163,5 +166,23 @@ public abstract class AbstractQueryIntegrationTests implements SessionFactorySco
             assertThat(mutationCount).isEqualTo(expectedMutationCount);
         });
         assertThat(collection.find()).containsExactlyElementsOf(expectedDocuments);
+    }
+
+    protected void assertMutationQueryFailure(
+            String hql,
+            Consumer<MutationQuery> queryPostProcessor,
+            Class<? extends Exception> expectedExceptionType,
+            String expectedExceptionMessage) {
+        sessionFactoryScope.inTransaction(session -> {
+            assertThatThrownBy(() -> {
+                var query = session.createMutationQuery(hql);
+                if (queryPostProcessor != null) {
+                    queryPostProcessor.accept(query);
+                }
+                query.executeUpdate();
+            }).isInstanceOf(expectedExceptionType)
+                    .hasMessage(expectedExceptionMessage);
+
+        });
     }
 }

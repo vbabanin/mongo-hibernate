@@ -16,17 +16,12 @@
 
 package com.mongodb.hibernate.query.mutation;
 
-import static org.assertj.core.api.Assertions.assertThat;
-import static org.hibernate.cfg.JdbcSettings.DIALECT;
-import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.Mockito.doAnswer;
-import static org.mockito.Mockito.spy;
-
 import com.mongodb.hibernate.dialect.MongoDialect;
 import com.mongodb.hibernate.query.AbstractQueryIntegrationTests;
 import org.hibernate.dialect.Dialect;
 import org.hibernate.engine.jdbc.dialect.spi.DialectResolutionInfo;
 import org.hibernate.engine.spi.SessionFactoryImplementor;
+import org.hibernate.exception.spi.SQLExceptionConversionDelegate;
 import org.hibernate.sql.ast.SqlAstTranslator;
 import org.hibernate.sql.ast.SqlAstTranslatorFactory;
 import org.hibernate.sql.ast.tree.MutationStatement;
@@ -39,6 +34,12 @@ import org.hibernate.sql.model.jdbc.JdbcMutationOperation;
 import org.hibernate.testing.orm.junit.ServiceRegistry;
 import org.hibernate.testing.orm.junit.Setting;
 import org.mockito.stubbing.Answer;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.hibernate.cfg.JdbcSettings.DIALECT;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.doAnswer;
+import static org.mockito.Mockito.spy;
 
 @ServiceRegistry(
         settings =
@@ -57,7 +58,7 @@ public class AbstractMutationQueryIntegrationTests extends AbstractQueryIntegrat
                 .containsExactlyInAnyOrder(expectedAffectedfCollections);
     }
 
-    public static final class MutationTranslateResultAwareDialect extends Dialect {
+    protected static final class MutationTranslateResultAwareDialect extends Dialect {
         private final Dialect delegate;
         private AbstractJdbcOperationQuery capturedTranslateResult;
 
@@ -66,6 +67,11 @@ public class AbstractMutationQueryIntegrationTests extends AbstractQueryIntegrat
             delegate = new MongoDialect(info);
         }
 
+        @Override
+        public SQLExceptionConversionDelegate buildSQLExceptionConversionDelegate() {
+            return delegate.buildSQLExceptionConversionDelegate();
+        }
+        
         @Override
         public SqlAstTranslatorFactory getSqlAstTranslatorFactory() {
             return new SqlAstTranslatorFactory() {
