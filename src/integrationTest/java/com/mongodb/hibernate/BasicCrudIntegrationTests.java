@@ -29,6 +29,7 @@ import com.mongodb.hibernate.embeddable.StructAggregateEmbeddableIntegrationTest
 import com.mongodb.hibernate.junit.InjectMongoCollection;
 import com.mongodb.hibernate.junit.MongoExtension;
 import jakarta.persistence.ColumnResult;
+import jakarta.persistence.ConstructorResult;
 import jakarta.persistence.Entity;
 import jakarta.persistence.Id;
 import jakarta.persistence.SqlResultSetMapping;
@@ -384,9 +385,31 @@ public class BasicCrudIntegrationTests implements SessionFactoryScopeAware {
                 @ColumnResult(name = "bigDecimal"),
                 @ColumnResult(name = "objectId")
             })
+    @SqlResultSetMapping(
+            name = Item.CONSTRUCTOR_MAPPING_FOR_ITEM,
+            classes =
+                    @ConstructorResult(
+                            targetClass = Item.class,
+                            columns = {
+                                @ColumnResult(name = "_id", type = Integer.class),
+                                @ColumnResult(name = "primitiveChar", type = Character.class),
+                                @ColumnResult(name = "primitiveInt", type = Integer.class),
+                                @ColumnResult(name = "primitiveLong", type = Long.class),
+                                @ColumnResult(name = "primitiveDouble", type = Double.class),
+                                @ColumnResult(name = "primitiveBoolean", type = Boolean.class),
+                                @ColumnResult(name = "boxedChar", type = Character.class),
+                                @ColumnResult(name = "boxedInt", type = Integer.class),
+                                @ColumnResult(name = "boxedLong", type = Long.class),
+                                @ColumnResult(name = "boxedDouble", type = Double.class),
+                                @ColumnResult(name = "boxedBoolean", type = Boolean.class),
+                                @ColumnResult(name = "string", type = String.class),
+                                @ColumnResult(name = "bigDecimal", type = BigDecimal.class),
+                                @ColumnResult(name = "objectId", type = ObjectId.class)
+                            }))
     public static class Item {
         public static final String COLLECTION_NAME = "items";
         public static final String MAPPING_FOR_ITEM = "Item";
+        public static final String CONSTRUCTOR_MAPPING_FOR_ITEM = "ConstructorItem";
 
         @Id
         public int id;

@@ -41,6 +41,7 @@ import com.mongodb.hibernate.embeddable.EmbeddableIntegrationTests;
 import com.mongodb.hibernate.embeddable.StructAggregateEmbeddableIntegrationTests;
 import com.mongodb.hibernate.junit.MongoExtension;
 import jakarta.persistence.ColumnResult;
+import jakarta.persistence.ConstructorResult;
 import jakarta.persistence.Entity;
 import jakarta.persistence.Id;
 import jakarta.persistence.SqlResultSetMapping;
@@ -362,25 +363,30 @@ class NativeQueryIntegrationTests implements SessionFactoryScopeAware {
         void testBasicValues() {
             sessionFactoryScope.inSession(session -> {
                 var mql = mql(COLLECTION_NAME, List.of(match(eq(item.id)), Item.projectAll()));
-                assertEq(
-                        item,
-                        session.createNativeQuery(mql, Item.MAPPING_FOR_ITEM, Tuple.class)
-                                .setTupleTransformer((tuple, aliases) -> new Item(
-                                        (int) tuple[0],
-                                        (char) tuple[1],
-                                        (int) tuple[2],
-                                        (long) tuple[3],
-                                        (double) tuple[4],
-                                        (boolean) tuple[5],
-                                        (Character) tuple[6],
-                                        (Integer) tuple[7],
-                                        (Long) tuple[8],
-                                        (Double) tuple[9],
-                                        (Boolean) tuple[10],
-                                        (String) tuple[11],
-                                        (BigDecimal) tuple[12],
-                                        (ObjectId) tuple[13]))
-                                .getSingleResult());
+                assertAll(
+                        () -> assertEq(
+                                item,
+                                session.createNativeQuery(mql, Item.MAPPING_FOR_ITEM, Tuple.class)
+                                        .setTupleTransformer((tuple, aliases) -> new Item(
+                                                (int) tuple[0],
+                                                (char) tuple[1],
+                                                (int) tuple[2],
+                                                (long) tuple[3],
+                                                (double) tuple[4],
+                                                (boolean) tuple[5],
+                                                (Character) tuple[6],
+                                                (Integer) tuple[7],
+                                                (Long) tuple[8],
+                                                (Double) tuple[9],
+                                                (Boolean) tuple[10],
+                                                (String) tuple[11],
+                                                (BigDecimal) tuple[12],
+                                                (ObjectId) tuple[13]))
+                                        .getSingleResult()),
+                        () -> assertEq(
+                                item,
+                                session.createNativeQuery(mql, Item.CONSTRUCTOR_MAPPING_FOR_ITEM, Item.class)
+                                        .getSingleResult()));
             });
         }
 
@@ -390,24 +396,36 @@ class NativeQueryIntegrationTests implements SessionFactoryScopeAware {
                 var mql = mql(
                         COLLECTION_NAME,
                         List.of(match(eq(itemWithFlattenedValue.id)), ItemWithFlattenedValue.projectFlattened()));
-                assertEq(
-                        itemWithFlattenedValue.flattened,
-                        session.createNativeQuery(mql, ItemWithFlattenedValue.MAPPING_FOR_FLATTENED_VALUE, Tuple.class)
-                                .setTupleTransformer((tuple, aliases) -> new EmbeddableIntegrationTests.Plural(
-                                        (char) tuple[0],
-                                        (int) tuple[1],
-                                        (long) tuple[2],
-                                        (double) tuple[3],
-                                        (boolean) tuple[4],
-                                        (Character) tuple[5],
-                                        (Integer) tuple[6],
-                                        (Long) tuple[7],
-                                        (Double) tuple[8],
-                                        (Boolean) tuple[9],
-                                        (String) tuple[10],
-                                        (BigDecimal) tuple[11],
-                                        (ObjectId) tuple[12]))
-                                .getSingleResult());
+                var mqlIncludingId = mql(
+                        COLLECTION_NAME,
+                        List.of(match(eq(itemWithFlattenedValue.id)), ItemWithFlattenedValue.projectAll()));
+                assertAll(
+                        () -> assertEq(
+                                itemWithFlattenedValue.flattened,
+                                session.createNativeQuery(
+                                                mql, ItemWithFlattenedValue.MAPPING_FOR_FLATTENED_VALUE, Tuple.class)
+                                        .setTupleTransformer((tuple, aliases) -> new EmbeddableIntegrationTests.Plural(
+                                                (char) tuple[0],
+                                                (int) tuple[1],
+                                                (long) tuple[2],
+                                                (double) tuple[3],
+                                                (boolean) tuple[4],
+                                                (Character) tuple[5],
+                                                (Integer) tuple[6],
+                                                (Long) tuple[7],
+                                                (Double) tuple[8],
+                                                (Boolean) tuple[9],
+                                                (String) tuple[10],
+                                                (BigDecimal) tuple[11],
+                                                (ObjectId) tuple[12]))
+                                        .getSingleResult()),
+                        () -> assertEq(
+                                itemWithFlattenedValue,
+                                session.createNativeQuery(
+                                                mqlIncludingId,
+                                                ItemWithFlattenedValue.CONSTRUCTOR_MAPPING_FOR_FLATTENED_VALUE,
+                                                ItemWithFlattenedValue.class)
+                                        .getSingleResult()));
             });
         }
 
@@ -461,12 +479,27 @@ class NativeQueryIntegrationTests implements SessionFactoryScopeAware {
                 var mql = mql(
                         COLLECTION_NAME,
                         List.of(match(eq(itemWithNestedValue.id)), ItemWithNestedValue.projectNested()));
-                assertEq(
-                        itemWithNestedValue.nested,
-                        session.createNativeQuery(mql, ItemWithNestedValue.MAPPING_FOR_NESTED_VALUE, Tuple.class)
-                                .setTupleTransformer(
-                                        (tuple, aliases) -> (StructAggregateEmbeddableIntegrationTests.Plural) tuple[0])
-                                .getSingleResult());
+                var mqlIncludingId = mql(
+                        COLLECTION_NAME, List.of(match(eq(itemWithNestedValue.id)), ItemWithNestedValue.projectAll()));
+                assertAll(
+                        () -> assertEq(
+                                itemWithNestedValue.nested,
+                                session.createNativeQuery(
+                                                mql, ItemWithNestedValue.MAPPING_FOR_NESTED_VALUE, Tuple.class)
+                                        .setTupleTransformer((tuple, aliases) ->
+                                                (StructAggregateEmbeddableIntegrationTests.Plural) tuple[0])
+                                        .getSingleResult()),
+                        () -> assertEq(
+                                itemWithNestedValue.nested,
+                                session.createNativeQuery(mql, StructAggregateEmbeddableIntegrationTests.Plural.class)
+                                        .getSingleResult()),
+                        () -> assertEq(
+                                itemWithNestedValue,
+                                session.createNativeQuery(
+                                                mqlIncludingId,
+                                                ItemWithNestedValue.CONSTRUCTOR_MAPPING_FOR_NESTED_VALUE,
+                                                ItemWithNestedValue.class)
+                                        .getSingleResult()));
             });
         }
 
@@ -478,15 +511,23 @@ class NativeQueryIntegrationTests implements SessionFactoryScopeAware {
                         List.of(
                                 match(eq(itemWithNestedValueHavingArraysAndCollections.id)),
                                 ItemWithNestedValueHavingArraysAndCollections.projectNested()));
-                assertEq(
-                        itemWithNestedValueHavingArraysAndCollections.nested,
-                        session.createNativeQuery(
-                                        mql,
-                                        ItemWithNestedValueHavingArraysAndCollections.MAPPING_FOR_NESTED_VALUE,
-                                        Tuple.class)
-                                .setTupleTransformer((tuple, aliases) ->
-                                        (StructAggregateEmbeddableIntegrationTests.ArraysAndCollections) tuple[0])
-                                .getSingleResult());
+                assertAll(
+                        () -> assertEq(
+                                itemWithNestedValueHavingArraysAndCollections.nested,
+                                session.createNativeQuery(
+                                                mql,
+                                                ItemWithNestedValueHavingArraysAndCollections.MAPPING_FOR_NESTED_VALUE,
+                                                Tuple.class)
+                                        .setTupleTransformer((tuple, aliases) ->
+                                                (StructAggregateEmbeddableIntegrationTests.ArraysAndCollections)
+                                                        tuple[0])
+                                        .getSingleResult()),
+                        () -> assertEq(
+                                itemWithNestedValueHavingArraysAndCollections.nested,
+                                session.createNativeQuery(
+                                                mql,
+                                                StructAggregateEmbeddableIntegrationTests.ArraysAndCollections.class)
+                                        .getSingleResult()));
             });
         }
 
@@ -651,8 +692,30 @@ class NativeQueryIntegrationTests implements SessionFactoryScopeAware {
                 @ColumnResult(name = "bigDecimal"),
                 @ColumnResult(name = "objectId")
             })
+    @SqlResultSetMapping(
+            name = ItemWithFlattenedValue.CONSTRUCTOR_MAPPING_FOR_FLATTENED_VALUE,
+            classes =
+                    @ConstructorResult(
+                            targetClass = ItemWithFlattenedValue.class,
+                            columns = {
+                                @ColumnResult(name = ID_FIELD_NAME, type = Integer.class),
+                                @ColumnResult(name = "primitiveChar", type = Character.class),
+                                @ColumnResult(name = "primitiveInt", type = Integer.class),
+                                @ColumnResult(name = "primitiveLong", type = Long.class),
+                                @ColumnResult(name = "primitiveDouble", type = Double.class),
+                                @ColumnResult(name = "primitiveBoolean", type = Boolean.class),
+                                @ColumnResult(name = "boxedChar", type = Character.class),
+                                @ColumnResult(name = "boxedInt", type = Integer.class),
+                                @ColumnResult(name = "boxedLong", type = Long.class),
+                                @ColumnResult(name = "boxedDouble", type = Double.class),
+                                @ColumnResult(name = "boxedBoolean", type = Boolean.class),
+                                @ColumnResult(name = "string", type = String.class),
+                                @ColumnResult(name = "bigDecimal", type = BigDecimal.class),
+                                @ColumnResult(name = "objectId", type = ObjectId.class)
+                            }))
     static class ItemWithFlattenedValue {
         static final String MAPPING_FOR_FLATTENED_VALUE = "FlattenedValue";
+        static final String CONSTRUCTOR_MAPPING_FOR_FLATTENED_VALUE = "ConstructorFlattenedValue";
 
         @Id
         int id;
@@ -664,6 +727,39 @@ class NativeQueryIntegrationTests implements SessionFactoryScopeAware {
         ItemWithFlattenedValue(int id, EmbeddableIntegrationTests.Plural flattened) {
             this.id = id;
             this.flattened = flattened;
+        }
+
+        public ItemWithFlattenedValue(
+                Integer id,
+                Character primitiveChar,
+                Integer primitiveInt,
+                Long primitiveLong,
+                Double primitiveDouble,
+                Boolean primitiveBoolean,
+                Character boxedChar,
+                Integer boxedInt,
+                Long boxedLong,
+                Double boxedDouble,
+                Boolean boxedBoolean,
+                String string,
+                BigDecimal bigDecimal,
+                org.bson.types.ObjectId objectId) {
+
+            this.id = id;
+            this.flattened = new EmbeddableIntegrationTests.Plural(
+                    primitiveChar,
+                    primitiveInt,
+                    primitiveLong,
+                    primitiveDouble,
+                    primitiveBoolean,
+                    boxedChar,
+                    boxedInt,
+                    boxedLong,
+                    boxedDouble,
+                    boxedBoolean,
+                    string,
+                    bigDecimal,
+                    objectId);
         }
 
         static Bson projectAll() {
@@ -739,8 +835,20 @@ class NativeQueryIntegrationTests implements SessionFactoryScopeAware {
     @SqlResultSetMapping(
             name = ItemWithNestedValue.MAPPING_FOR_NESTED_VALUE,
             columns = {@ColumnResult(name = "nested", type = StructAggregateEmbeddableIntegrationTests.Plural.class)})
+    @SqlResultSetMapping(
+            name = ItemWithNestedValue.CONSTRUCTOR_MAPPING_FOR_NESTED_VALUE,
+            classes =
+                    @ConstructorResult(
+                            targetClass = ItemWithNestedValue.class,
+                            columns = {
+                                @ColumnResult(name = ID_FIELD_NAME, type = Integer.class),
+                                @ColumnResult(
+                                        name = "nested",
+                                        type = StructAggregateEmbeddableIntegrationTests.Plural.class)
+                            }))
     static class ItemWithNestedValue {
         static final String MAPPING_FOR_NESTED_VALUE = "NestedValue";
+        static final String CONSTRUCTOR_MAPPING_FOR_NESTED_VALUE = "ConsructorNestedValue";
 
         @Id
         int id;
