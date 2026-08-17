@@ -29,6 +29,11 @@ import org.bson.BsonWriter;
 @SuppressWarnings("MissingSummary")
 public record AstLiteralExpression(AstValue value) implements AstExpression {
     @Override
+    public int valueNumber(VNRegistry vn) {
+        return vn.memoize(this, vnRegistry -> vnRegistry.intern("Literal", value));
+    }
+
+    @Override
     public void render(BsonWriter writer) {
         writer.writeStartDocument();
         writer.writeName("$literal");

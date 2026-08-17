@@ -23,6 +23,16 @@ import org.bson.BsonWriter;
 @SuppressWarnings("MissingSummary")
 public record AstInExpression(AstExpression value, List<? extends AstExpression> options) implements AstExpression {
     @Override
+    public int valueNumber(VNRegistry vn) {
+        return vn.memoize(
+                this,
+                vnRegistry -> vnRegistry.intern(
+                        "In",
+                        value.valueNumber(vnRegistry),
+                        options.stream().map(o -> o.valueNumber(vnRegistry)).toList()));
+    }
+
+    @Override
     public void render(BsonWriter writer) {
         writer.writeStartDocument();
         writer.writeName("$in");

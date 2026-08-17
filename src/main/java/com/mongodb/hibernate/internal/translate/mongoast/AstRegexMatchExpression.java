@@ -22,6 +22,12 @@ import org.bson.BsonWriter;
 @SuppressWarnings("MissingSummary")
 public record AstRegexMatchExpression(AstExpression input, String regex, String options) implements AstExpression {
     @Override
+    public int valueNumber(VNRegistry vn) {
+        return vn.memoize(
+                this, vnRegistry -> vnRegistry.intern("Regex", input.valueNumber(vnRegistry), regex, options));
+    }
+
+    @Override
     public void render(BsonWriter writer) {
         writer.writeStartDocument();
         writer.writeName("$regexMatch");

@@ -24,6 +24,16 @@ import org.bson.BsonWriter;
 public record AstLogicalOperatorExpression(AstLogicalOperator operator, List<? extends AstExpression> operands)
         implements AstExpression {
     @Override
+    public int valueNumber(VNRegistry vn) {
+        return vn.memoize(
+                this,
+                vnRegistry -> vnRegistry.intern(
+                        "Logical",
+                        operator,
+                        operands.stream().map(o -> o.valueNumber(vnRegistry)).toList()));
+    }
+
+    @Override
     public void render(BsonWriter writer) {
         writer.writeStartDocument();
         writer.writeName(operator.getOperatorName());

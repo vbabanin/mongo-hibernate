@@ -22,6 +22,11 @@ import org.bson.BsonWriter;
 @SuppressWarnings("MissingSummary")
 public record AstFieldPathExpression(String fieldPath) implements AstExpression {
     @Override
+    public int valueNumber(VNRegistry vn) {
+        return vn.memoize(this, vnRegistry -> vnRegistry.intern("FieldPath", fieldPath));
+    }
+
+    @Override
     public void render(BsonWriter writer) {
         writer.writeString("$" + fieldPath);
     }

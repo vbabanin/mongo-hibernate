@@ -29,6 +29,11 @@ import org.bson.BsonWriter;
 @SuppressWarnings("MissingSummary")
 public record AstValueExpression(AstValue value) implements AstExpression {
     @Override
+    public int valueNumber(VNRegistry vn) {
+        return vn.memoize(this, vnRegistry -> vnRegistry.intern("Value", value));
+    }
+
+    @Override
     public void render(BsonWriter writer) {
         value.render(writer);
     }

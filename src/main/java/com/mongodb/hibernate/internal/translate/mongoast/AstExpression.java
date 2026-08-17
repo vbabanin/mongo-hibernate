@@ -23,4 +23,20 @@ package com.mongodb.hibernate.internal.translate.mongoast;
  * @hidden
  */
 @SuppressWarnings("MissingSummary")
-public interface AstExpression extends AstNode {}
+public sealed interface AstExpression extends AstNode
+        permits AstBinaryOperatorExpression,
+                AstFieldPathExpression,
+                AstInExpression,
+                AstLiteralExpression,
+                AstLogicalOperatorExpression,
+                AstRegexMatchExpression,
+                AstUnaryOperatorExpression,
+                AstValueExpression,
+                AstVariableExpression {
+
+    /**
+     * Returns a canonical value number for this expression's structure. Two structurally equal expressions return the
+     * same integer when interned through the same {@link VNRegistry}.
+     */
+    int valueNumber(VNRegistry vn);
+}
