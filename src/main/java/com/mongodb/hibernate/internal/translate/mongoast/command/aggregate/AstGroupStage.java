@@ -16,63 +16,51 @@
 
 package com.mongodb.hibernate.internal.translate.mongoast.command.aggregate;
 
-import com.mongodb.hibernate.internal.translate.mongoast.AstValue;
-import org.bson.BsonWriter;
+import static com.mongodb.hibernate.internal.MongoAssertions.assertFalse;
 
-/*
- * Copyright 2025-present MongoDB, Inc.
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *   http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
- */
+import java.util.Collection;
+import java.util.function.Consumer;
+import org.bson.BsonWriter;
+import org.hibernate.sql.exec.spi.JdbcParameterBinder;
 
 /**
- * Represents MongoDB's $group aggregation stage.
+ * Represents MongoDB's {@code $group} aggregation stage.
  *
- * <p>SQL: SELECT country, COUNT(*), AVG(age) FROM Contact GROUP BY country
+ * <p>HQL: SELECT country FROM Contact GROUP BY country
  *
  * <p>MongoDB:
  *
  * <pre>
  * {
  *   "$group": {
- *     "_id": "$country",
- *     "count": { "$sum": 1 },
- *     "avgAge": { "$avg": "$age" }
+ *     "_id": {
+ *       "country": "$country"
+ *     }
  *   }
  * }
  * </pre>
  *
- * <p>Group Key Variants:
- *
- * <ul>
- *   <li>Single field: "_id": "$country"
- *   <li>Multiple fields: "_id": { "country": "$country", "age": "$age" }
- *   <li>Global aggregation: "_id": null (no GROUP BY clause)
- * </ul>
+ * @hidden
  */
-public record AstGroupStage(AstValue groupKey // What to group by (goes in _id field)
-        ) implements AstStage {
+public record AstGroupStage(Collection<? extends AstGroupStageSpecification> specifications) implements AstStage {
+
+    public AstGroupStage {
+        assertFalse(specifications.isEmpty());
+    }
 
     @Override
-    public void render(BsonWriter writer) {
+    public void render(BsonWriter writer, Consumer<JdbcParameterBinder> binderConsumer) {
         writer.writeStartDocument();
         {
             writer.writeName("$group");
             writer.writeStartDocument();
             {
-                // Group key (_id field)
                 writer.writeName("_id");
-                groupKey.render(writer);
+                writer.writeStartDocument();
+                {
+                    specifications.forEach(specification -> specification.render(writer, binderConsumer));
+                }
+                writer.writeEndDocument();
             }
             writer.writeEndDocument();
         }

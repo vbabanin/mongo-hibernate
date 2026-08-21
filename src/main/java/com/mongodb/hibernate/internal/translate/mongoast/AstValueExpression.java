@@ -16,13 +16,17 @@
 
 package com.mongodb.hibernate.internal.translate.mongoast;
 
+import java.util.function.Consumer;
 import org.bson.BsonWriter;
+import org.hibernate.sql.exec.spi.JdbcParameterBinder;
 
 /**
  * An {@link AstValue} (a literal or parameter) used verbatim in aggregation-expression position. Use this only when the
  * value cannot be misread there; a value that could be taken as a field path or an operator invocation (a string
  * beginning with {@code $}, or a document/array) must instead go through {@link AstLiteralExpression} so it is wrapped
- * in {@code $literal}.
+ * in {@code $literal}. That leaves operand position, an operator's argument. A {@code $project} field value is misread
+ * whatever the value is, a number or boolean being an inclusion/exclusion flag there, so it always uses
+ * {@link AstLiteralExpression}.
  *
  * @hidden
  */
@@ -34,7 +38,7 @@ public record AstValueExpression(AstValue value) implements AstExpression {
     }
 
     @Override
-    public void render(BsonWriter writer) {
-        value.render(writer);
+    public void render(BsonWriter writer, Consumer<JdbcParameterBinder> binderConsumer) {
+        value.render(writer, binderConsumer);
     }
 }

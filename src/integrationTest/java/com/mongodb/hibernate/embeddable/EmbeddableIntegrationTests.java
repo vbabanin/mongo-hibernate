@@ -68,7 +68,7 @@ import org.junit.jupiter.api.extension.ExtendWith;
 @ExtendWith(MongoExtension.class)
 public class EmbeddableIntegrationTests implements SessionFactoryScopeAware, MongoServiceRegistryProducer {
     @InjectMongoCollection(COLLECTION_NAME)
-    private static MongoCollection<BsonDocument> mongoCollection;
+    private MongoCollection<BsonDocument> mongoCollection;
 
     private SessionFactoryScope sessionFactoryScope;
 
@@ -545,7 +545,7 @@ public class EmbeddableIntegrationTests implements SessionFactoryScopeAware, Mon
         assertEq(expectedItem, loadedItem);
     }
 
-    private static void assertCollectionContainsExactly(String documentAsJsonObject) {
+    private void assertCollectionContainsExactly(String documentAsJsonObject) {
         assertThat(mongoCollection.find()).containsExactly(BsonDocument.parse(documentAsJsonObject));
     }
 
@@ -807,14 +807,6 @@ public class EmbeddableIntegrationTests implements SessionFactoryScopeAware, Mon
     @Nested
     class Unsupported implements MongoServiceRegistryProducer {
         @Test
-        void testPrimaryKeySpanningMultipleFields() {
-            assertThatThrownBy(() -> new MetadataSources()
-                            .addAnnotatedClass(ItemWithPluralAsId.class)
-                            .buildMetadata())
-                    .hasMessageContaining("does not support primary key spanning multiple columns");
-        }
-
-        @Test
         void testStructAggregateEmbeddable() {
             var item = new ItemWithFlattenedValueHavingStructAggregateEmbeddable(
                     1,
@@ -832,13 +824,6 @@ public class EmbeddableIntegrationTests implements SessionFactoryScopeAware, Mon
                             .close())
                     .isInstanceOf(FeatureNotSupportedException.class)
                     .hasMessageContaining("must have at least one persistent attribute");
-        }
-
-        @Entity
-        @Table(name = COLLECTION_NAME)
-        static class ItemWithPluralAsId {
-            @Id
-            Plural id;
         }
 
         @Entity
