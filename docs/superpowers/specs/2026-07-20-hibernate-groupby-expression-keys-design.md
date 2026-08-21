@@ -397,6 +397,393 @@ Both B1 (resolution 2) and B2 are single-pass, bottom-up, O(N). B1
 localizes the change to the rewriter and AST records; B2 localizes it to
 visitors. Pick when we decide to invest in canonicalization.
 
+## Optimized approach: Structural Value Numbering
+
+### Why naive structural comparison is O(N²)
+
+Hibernate builds the GROUP BY and SELECT expression trees independently.
+`SELECT x + 1 ... GROUP BY x + 1` produces two separate
+`BinaryArithmeticExpression` instances with no shared pointers. Object
+identity (`==`) does not work. Structural comparison at each composite
+node during translation requires walking the subtree — O(subtree_size × K)
+per node, O(N² × K) for the whole SELECT expression tree where N = number
+of nodes and K = number of group keys.
+
+Why compilers avoid this: compilers share AST nodes — the same `x + 1`
+object appears in both GROUP BY and SELECT. Equality is `==`. That sharing
+is established during semantic analysis by looking up the expression in the
+SELECT list (Hibernate does this for aliases and positional refs via
+`SqmAliasedNodeRef`, but not for explicit expressions — see
+`BaseSqmToSqlAstConverter.resolveGroupOrOrderByExpression`, line 2629:
+`groupByClauseExpression.accept(this)` builds a fresh SQL AST node).
+
+### Value Numbering
+
+Production compilers (LLVM GVN, GCC SCCVN) solve the equivalence problem
+with **structural value numbering** (Alpern, Wegman, Zadeck 1988): assign
+each distinct expression a canonical integer (**value number, VN**) such
+that two expressions have the same VN if and only if they are structurally
+identical (given semantic leaf identity).
+
+The algorithm is bottom-up (post-order). Each node produces an
+**expression key** — a tuple of its opcode and its children's VNs — and
+looks up or inserts that key in a global hash table that assigns
+auto-incremented integers:
+
+```java
+sealed interface ExprKey {}
+record ColumnKey(String fieldPath)                           implements ExprKey {}
+record LiteralKey(Object value)                              implements ExprKey {}
+record CompositeKey(String opcode, int leftVN, int rightVN)  implements ExprKey {}
+
+// Global tables (shared across GROUP BY and SELECT passes)
+Map<ExprKey, Integer> vnTable  = new HashMap<>();
+int nextVN = 0;
+
+int vn(Expression e) {
+    ExprKey key = switch (e) {
+        case ColumnReference c  -> new ColumnKey(c.resolvedFieldPath());
+        case QueryLiteral l     -> new LiteralKey(l.getLiteralValue());
+        case BinaryArithmetic b -> new CompositeKey(b.operator().name(),
+                                       vn(b.getLeftHandOperand()),
+                                       vn(b.getRightHandOperand()));
+        // ...
+    };
+    return vnTable.computeIfAbsent(key, k -> nextVN++);
+}
+```
+
+The critical property: because `ColumnKey("x")` is the same Java record
+regardless of which `ColumnReference` object produced it, both GROUP BY's
+`x` and SELECT's `x` map to the same VN. Their parent composites therefore
+produce the same `CompositeKey` and receive the same VN — without any
+tree-vs-tree comparison.
+
+**Cost:** O(k) per node where k = number of immediate children; O(N) for
+the whole expression tree. Hash table lookup is expected O(1) after hashing
+the key (Java `HashMap` handles collisions by full key equality, not by
+relying on hash uniqueness).
+
+**Hash-consing** is a related technique used in functional compilers (GHC):
+instead of assigning a number, `cons(op, children)` interns the node
+itself in a global table so the same expression is the same object. VN is
+the query-oriented analogue — same structure → same integer; does not
+require immutable nodes.
+
+### Two-pass algorithm with selective top-down replacement
+
+Naively applying VNs bottom-up during translation reintroduces the
+canonicalization miss: if `x` is also a group key, it is rewritten to
+`$_id.x` before the parent `x + 1` is assembled, so the parent's VN no
+longer matches the stored GROUP BY key VN (see "canonicalization cost"
+section). Fix: separate VN computation from translation.
+
+**Pass 1 — bottom-up VN computation (pre-order on the way up):**
+Walk the Hibernate SQL AST expression tree post-order. At each node,
+compute its VN and record matches: if `groupKeyVN.containsKey(vn)`, add
+`(node, subKey)` to a match list. No translation occurs. O(N).
+
+**Pass 2 — selective top-down translation (pre-order with early exit):**
+Walk the same expression tree top-down. At each node:
+
+1. Is this node in the match list? → emit `"$_id.<subKey>"`,
+   **stop recursion** (do not descend into children).
+2. Otherwise → translate this node normally and recurse into children.
+
+Stopping recursion on a match is the key mechanism. For
+`SELECT x + 1 GROUP BY x, x + 1` where both `x` and `x + 1` are group
+keys, both appear in the match list after Pass 1. In Pass 2:
+
+- Reach `x + 1` first (top-down) → match → emit `"$_id.k1"`, stop.
+  `x` is never visited. Canonicalization preserved. ✓
+
+For sibling matches (`x` in left branch, `y` in right branch):
+
+- Reach `x` → match → emit `"$_id.x"`, stop.
+- Reach `y` → match → emit `"$_id.y"`, stop. ✓
+
+**Overlapping matches are safe without explicit conflict detection.**
+If `x` and `x + 1` both appear in the match list and Pass 2 replaces
+`x + 1` first (top-down ordering guarantees this for a parent-child pair),
+the `x` entry in the match list is never reached because descent stopped.
+If the traversal order were reversed (bottom-up), replacing `x` would
+discard the subtree containing it; the replacement would apply to a node
+no longer referenced in the output tree — effectively a no-op. Either
+way, no explicit overlap detection is needed: process all entries in the
+match list; safe by construction.
+
+**Total cost:** O(N) for Pass 1 + O(N) for Pass 2 = O(N). No O(N²)
+structural comparison at any point.
+
+### Leaf semantic identity
+
+The leaf VN must reflect **semantic identity**, not textual name.
+`a.city` and `b.city` are different columns that happen to share the
+column name `city`. Using `ColumnKey("city")` for both would incorrectly
+equate them.
+
+For Hibernate's SQL AST, the correct identity is the resolved field path
+including the table binding qualifier (e.g.
+`ColumnKey("tableAlias.city")` or using the `ColumnReference`'s
+`getQualifyingTableReference()` identity). This ensures two `x` references
+to different tables produce different VNs even if the column name is the
+same.
+
+### Structural matching aligns with PostgreSQL semantics
+
+Value numbering is purely structural: two expressions get the same VN
+only if they are byte-for-byte identical after leaf-identity resolution.
+Commutativity, associativity, and identity-element folding are not
+recognized.
+
+This mirrors PostgreSQL's GROUP BY semantics exactly. Verified against
+Postgres 16 (Docker `postgres:latest`, port 5432) on 2026-08-18:
+
+| Query | Result |
+|-------|--------|
+| `SELECT x + 1 FROM t GROUP BY x + 1` | ✅ works |
+| `SELECT x + 1 FROM t GROUP BY 1 + x` | ❌ `column "t.x" must appear in the GROUP BY clause` |
+| `SELECT 1 + x FROM t GROUP BY x + 1` | ❌ same error |
+| `SELECT x + (y + z) FROM t GROUP BY (x + y) + z` | ❌ same error |
+| `SELECT x FROM t GROUP BY x + 0` | ❌ same error |
+
+Postgres does not fold commutative, associative, or identity-element
+equivalences during GROUP BY-membership checking — it uses structural
+equality. Our VN-based approach therefore matches Postgres behavior
+without any canonicalization pre-pass. Users writing `GROUP BY 1 + x`
+and `SELECT x + 1` will see the same "column not in GROUP BY" error
+they would in Postgres.
+
+If a future SQL dialect adds semantic canonicalization to GROUP BY, the
+translator could add pre-VN normalization rules (sort commutative
+operands, left-associate binary ops, drop `+ 0` / `* 1`, etc.) without
+changing the framework.
+
+### Result-set equivalence with PostgreSQL (verified 2026-08-18)
+
+The three canonical shapes covered by the expression-key implementation
+were run against PostgreSQL 16 (`postgres:latest` container on
+`localhost:5432`) with seed `(1), (1), (2), (2), (3)` and produced:
+
+| HQL | Postgres result set |
+|-----|---------------------|
+| `SELECT x + 1 FROM t GROUP BY x + 1` | `[2, 3, 4]` |
+| `SELECT x + 1 FROM t GROUP BY x`     | `[2, 3, 4]` |
+| `SELECT x + 1, x FROM t GROUP BY x, x + 1` | `[(2, 1), (3, 2), (4, 3)]` |
+
+Our translator produces the same result sets against MongoDB, verified
+by the corresponding integration tests
+(`GroupByHavingIntegrationTests.ExpressionKeys`):
+
+- `testWholeMatch` — whole-match substitution to `_id.k0`.
+- `testLeafRewriteOverColumnKey` — leaf rewrite to `_id.primitiveInt`
+  inside a composite `$project` expression.
+- `testParentWinsOverLeafCanonicalization` — canonicalization: parent
+  wholesale match wins over child leaf match, producing `_id.k1` rather
+  than `{$add: ["$_id.primitiveInt", 1]}`.
+
+## Formal foundations and academic references
+
+The design draws on three well-established techniques from compiler
+theory: **structural value numbering** for expression identity,
+**strategic term rewriting** for the substitution walker, and
+**hash-consing** for the interning table backing the VN registry.
+This section maps each implementation choice to its formal literature.
+
+### Structural value numbering (SVN)
+
+Value numbering assigns a canonical integer identifier (the *value
+number*, VN) to each distinct expression such that two expressions
+receive the same VN if and only if they are structurally identical
+under a chosen leaf-identity relation. The technique originates with
+Cocke's global common-subexpression elimination work [Cocke1970] and
+was formalized as *value numbering* by Ershov [Ershov1958].
+
+Modern algorithmic treatments trace to:
+
+- **Alpern, Wegman, Zadeck (1988)** [AWZ1988] — introduced the term
+  "value numbering" in its contemporary form, defining a hash-based
+  canonicalization procedure over a fixed set of operator symbols.
+- **Rosen, Wegman, Zadeck (1988)** [RWZ1988] — established the SSA-plus-
+  value-numbering framework that underpins LLVM's `GVN` pass.
+- **Simpson (1996)** [Simpson1996] — Rice University PhD thesis
+  formalizing the value-driven redundancy-elimination algorithms that
+  LLVM's `NewGVN` implements.
+- **Muchnick (1997)** [Muchnick1997], *Advanced Compiler Design and
+  Implementation*, Chapter 12 — the canonical textbook treatment.
+
+Our implementation is a **local, tree-form value numbering** (no SSA):
+`VNRegistry.intern(tag, fields...)` uses `HashMap.computeIfAbsent` to
+assign each fresh structural key an auto-incremented integer.
+Composite keys `(opcode, leftVN, rightVN, ...)` are formed post-order
+so the recursive step is O(1) after child VNs are known — the same
+recurrence LLVM uses internally in
+`ValueNumbering::createExpr(Instruction *I)` where operand value
+numbers are looked up and combined into an expression key
+[LLVMSource].
+
+### Hash-consing and structural sharing
+
+The `VNRegistry` interning table is a specialization of **hash-consing**
+[Ershov1958, Goto1974, FilliatreConchon2006]. Hash-consing enforces
+that structurally equal terms are represented by the same object
+(pointer equality equals structural equality). We use the same
+mechanism, but store the canonical integer rather than the object —
+records give us the equal-hash-code invariant for free.
+
+Java-record `equals`/`hashCode` are trivially structural [JLS-Records],
+so `ExprKey(String tag, List<Object> fields)` is a valid hash-consing
+key without additional machinery.
+
+### Attribute grammars for VN memoization
+
+Per-node `valueNumber(VNRegistry)` is a **synthesized attribute** in
+the attribute-grammar sense [Knuth1968]: the value of the attribute at
+a node is a function of the same attribute computed at its children.
+`VNRegistry.memoize(node, compute)` provides the standard
+memoization-of-synthesized-attributes technique using an
+`IdentityHashMap<AstExpression, Integer>`. This gives each node an
+amortized O(1) `valueNumber()` computation regardless of how many
+times the method is invoked over the query's lifetime.
+
+The choice of `IdentityHashMap` (reference equality) rather than
+structural equality is intentional: two structurally-identical
+`AstExpression` records produce the same VN via the ExprKey interning
+path, and per-instance memoization additionally prevents redundant
+subtree walks when the same instance is queried from multiple
+enclosing rewrites (see `AstRewriter.rewrite(AstExpression)`).
+
+### Strategic term rewriting
+
+The two-phase `AstRewriter` (pre-rules top-down, post-rules bottom-up,
+one-visit-per-node with descent short-circuit on match) implements a
+subset of the **strategic term rewriting** framework introduced by
+Visser [Visser2001] in the Stratego language. Stratego's core
+combinators — `topdown`, `bottomup`, `try`, `choice`, `all` — express
+tree traversals as compositions of primitive rewrites. Our simpler
+model fixes the traversal (single top-down descent with post-order
+finalization) but is drawn directly from the same conceptual space.
+
+Related term-rewriting frameworks in the same family:
+
+- **TXL** [CordyMalton1998] — the earliest tree-transformation
+  language with strategy combinators.
+- **Rascal** [KlintVanDerStormVinju2009] — a modern descendant with a
+  larger domain-specific-language ambit.
+- **ELAN** [BorovanskyKirchnerKirchnerRingeissen1996] — the theoretical
+  precursor that formalized strategy calculi.
+
+Our `RewriteRule<AstNode>` corresponds to a primitive rewrite; the
+list-of-rules `AstRewriter` constructor argument corresponds to
+Stratego's `choice(rules)` combinator (first match wins for pre-rules)
+and `seq(rules)` combinator (each post-rule sees the previous rule's
+output).
+
+### Semantic alignment with PostgreSQL
+
+Value numbering is **structural** — the equivalence relation is
+"same tree shape modulo leaf identity" — and does not fold
+commutative, associative, or identity-element equivalences. This
+matches PostgreSQL's `GROUP BY`-membership check exactly (verified
+above): Postgres does not accept `SELECT x + 1 GROUP BY 1 + x` even
+though the expressions are semantically equal. SQL standard SQL:2016
+§7.9 permits implementations to check functional determination
+structurally; both Postgres and our implementation take that option.
+
+Semantic canonicalization (via rewrite normalization rules pre-VN)
+would relax our behavior beyond Postgres. The framework is prepared
+for it — pre-normalization can be added as ordinary `RewriteRule`s
+running before VN population — but the current design deliberately
+does not add it, to preserve Postgres-equivalent semantics.
+
+### Accumulator dedup via VN
+
+The accumulator infrastructure reuses VN as a structural-identity
+device. When the SELECT/HAVING visitor encounters an aggregate
+function call `SUM(x + 1)`, we translate its argument to
+`AstExpression`, wrap in `AstUnaryOperatorExpression("$sum", arg)`,
+compute VN, and `computeIfAbsent` in a `LinkedHashMap<Integer,
+AstElement>`. Same VN → same accumulator entry; the LinkedHashMap's
+insertion-ordered `values()` view is emitted in `$group` alongside
+`_id`.
+
+This is a direct application of **common-subexpression elimination**
+[Cocke1970] to accumulator identification. The classical CSE step
+inside a compiler eliminates redundant computation of the same
+value; we use the same VN-based test to eliminate redundant
+accumulator entries. Because SQL aggregate arguments are
+per-row-scope (evaluated on raw input rows before grouping), the
+accumulator's *inner* expression is not subject to GROUP BY
+substitution — we register it raw, and the walker never rewrites
+inside `$group`.
+
+The ordering constraint (HAVING scanned before SELECT so
+HAVING-only accumulators land in the map in time for the `$group`
+emit) is the same phase-order that Rosen-Wegman-Zadeck [RWZ1988]
+identify for global value numbering with side-effecting operators.
+
+### Summary of implementation-to-theory mapping
+
+| Implementation artifact | Formal concept | Reference |
+|-------------------------|----------------|-----------|
+| `AstExpression.valueNumber()` | Synthesized attribute | Knuth 1968 |
+| `VNRegistry.memoize(node, ...)` | Attribute memoization | Standard AG technique |
+| `VNRegistry.intern(tag, fields...)` | Hash-consing | Ershov 1958, Goto 1974 |
+| `ExprKey(tag, List<Object>)` structural identity | Structural equality | Java records / JLS |
+| Composite VN from child VNs | Local value numbering | Alpern-Wegman-Zadeck 1988 |
+| `AstRewriter` pre-rule top-down | `topdown` strategy | Visser 2001 (Stratego) |
+| `AstRewriter` post-rule bottom-up | `bottomup` strategy | Visser 2001 (Stratego) |
+| Rule short-circuit on match | `choice` combinator | Visser 2001 |
+| `GroupBySubstitutionRule` | Structural substitution | Term rewriting theory |
+| Accumulator `LinkedHashMap<VN, ...>` dedup | Common subexpression elimination | Cocke 1970 |
+| Per-instance `IdentityHashMap` cache | Reference-equality memoization | Standard CS technique |
+
+### Bibliography
+
+- **[Cocke1970]** Cocke, J. (1970). "Global common subexpression
+  elimination". *Proceedings of a symposium on Compiler optimization*,
+  20–24.
+- **[Ershov1958]** Ershov, A.P. (1958). "On programming of arithmetic
+  operations". *Communications of the ACM* 1(8): 3–6.
+- **[Goto1974]** Goto, E. (1974). "Monocopy and associative
+  algorithms in extended Lisp". Technical Report TR-74-03,
+  University of Tokyo.
+- **[Knuth1968]** Knuth, D.E. (1968). "Semantics of context-free
+  languages". *Mathematical Systems Theory* 2(2): 127–145.
+- **[AWZ1988]** Alpern, B., Wegman, M.N., Zadeck, F.K. (1988).
+  "Detecting equality of variables in programs". *POPL '88*: 1–11.
+- **[RWZ1988]** Rosen, B.K., Wegman, M.N., Zadeck, F.K. (1988).
+  "Global value numbers and redundant computations". *POPL '88*:
+  12–27.
+- **[CytronFerranteRosenWegmanZadeck1991]** Cytron, R., Ferrante, J.,
+  Rosen, B.K., Wegman, M.N., Zadeck, F.K. (1991). "Efficiently
+  computing static single assignment form and the control dependence
+  graph". *TOPLAS* 13(4): 451–490.
+- **[Simpson1996]** Simpson, L.T. (1996). *Value-Driven Redundancy
+  Elimination*. PhD thesis, Rice University.
+- **[Muchnick1997]** Muchnick, S.S. (1997). *Advanced Compiler
+  Design and Implementation*. Morgan Kaufmann. Ch. 12.
+- **[CordyMalton1998]** Cordy, J.R., Malton, A.J. (1998). "TXL: A
+  language for programming language tools and applications". *Proc.
+  8th Intl. Conf. on Compiler Construction*.
+- **[BorovanskyKirchnerKirchnerRingeissen1996]** Borovanský, P.,
+  Kirchner, C., Kirchner, H., Ringeissen, C. (1996). "Rewriting with
+  strategies in ELAN: A functional semantics". *Intl. Journal of
+  Foundations of Computer Science*.
+- **[Visser2001]** Visser, E. (2001). "Stratego: A language for
+  program transformation based on rewriting strategies. System
+  description of Stratego 0.5". *RTA '01*: 357–361.
+- **[FilliatreConchon2006]** Filliâtre, J-C., Conchon, S. (2006).
+  "Type-safe modular hash-consing". *ML Workshop*: 12–19.
+- **[KlintVanDerStormVinju2009]** Klint, P., van der Storm, T.,
+  Vinju, J. (2009). "RASCAL: A domain specific language for source
+  code analysis and manipulation". *SCAM '09*.
+- **[LLVMSource]** LLVM Project. `llvm/lib/Transforms/Scalar/GVN.cpp`
+  and `NewGVN.cpp` — production reference implementations.
+- **[JLS-Records]** Java Language Specification §8.10 (records) — the
+  auto-generated `equals`/`hashCode` contract mandates structural
+  equality over the record's components.
+
 ## Open questions
 
 - **Sub-key name collisions between column keys (`address#city`) and
