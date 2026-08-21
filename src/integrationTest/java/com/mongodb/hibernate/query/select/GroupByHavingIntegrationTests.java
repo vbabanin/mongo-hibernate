@@ -16,11 +16,10 @@
 
 package com.mongodb.hibernate.query.select;
 
-import static com.mongodb.hibernate.query.select.GroupByQueryIntegrationTests.Item.COLLECTION_NAME;
+import static com.mongodb.hibernate.query.select.GroupByHavingIntegrationTests.Item.COLLECTION_NAME;
 import static org.assertj.core.api.Assertions.assertThat;
 
 import com.mongodb.client.MongoCollection;
-import com.mongodb.client.model.Filters;
 import com.mongodb.hibernate.internal.FeatureNotSupportedException;
 import com.mongodb.hibernate.junit.InjectMongoCollection;
 import com.mongodb.hibernate.junit.MongoExtension;
@@ -32,7 +31,6 @@ import jakarta.persistence.FetchType;
 import jakarta.persistence.Id;
 import jakarta.persistence.JoinColumn;
 import jakarta.persistence.ManyToOne;
-import java.util.ArrayList;
 import java.util.List;
 import java.util.Set;
 import org.hibernate.annotations.Struct;
@@ -44,7 +42,8 @@ import org.junit.jupiter.api.extension.ExtendWith;
 
 @ExtendWith(MongoExtension.class)
 @DomainModel(
-        annotatedClasses = {GroupByQueryIntegrationTests.Item.class, GroupByQueryIntegrationTests.ItemStruct.class})
+        annotatedClasses = {GroupByHavingIntegrationTests.Item.class, GroupByHavingIntegrationTests.ItemStruct.class})
+@SuppressWarnings({"unchecked", "rawtypes"})
 public class GroupByHavingIntegrationTests extends AbstractQueryIntegrationTests {
 
     @InjectMongoCollection(COLLECTION_NAME)
@@ -591,39 +590,221 @@ public class GroupByHavingIntegrationTests extends AbstractQueryIntegrationTests
     class Unsupported extends AbstractQueryIntegrationTests {
 
         @Test
-        void groupByArithmeticExpression() {
-            assertSelectQueryFailure(
-                    "select b.primitiveInt + 1 from Item as b GROUP BY b.primitiveInt + 1",
-                    Object.class,
-                    FeatureNotSupportedException.class,
-                    "Only column references are supported in group by");
-        }
-
-        @Test
-        void groupByArithmeticExpressionWithHaving() {
-            assertSelectQueryFailure(
-                    "select b.primitiveInt + 1 from Item as b GROUP BY b.primitiveInt + 1 HAVING b.primitiveInt + 1 > 2",
-                    Object.class,
-                    FeatureNotSupportedException.class,
-                    "Only column references are supported in group by");
-        }
-
-        @Test
-        void nonGroupedSelectColumnThrows() {
-            assertSelectQueryFailure(
-                    "select b.string, b.primitiveInt from Item as b GROUP BY b.primitiveInt",
-                    Object.class,
-                    FeatureNotSupportedException.class,
-                    "Columns that are not part of group by are not supported");
-        }
-
-        @Test
         void selectDistinctWithGroupByThrows() {
             assertSelectQueryFailure(
                     "select DISTINCT b.primitiveInt from Item as b GROUP BY b.primitiveInt",
                     Object.class,
                     FeatureNotSupportedException.class,
                     "SELECT DISTINCT is not supported");
+        }
+    }
+
+    @Nested
+    @DomainModel(annotatedClasses = {Item.class})
+    class ExpressionKeys extends AbstractQueryIntegrationTests {
+
+        @BeforeEach
+        void beforeEach() {
+            getSessionFactoryScope().inTransaction(session -> {
+                session.createMutationQuery("delete from Item").executeUpdate();
+                List.of(
+                                new Item(1, 1, "a", true, new ItemStruct(1)),
+                                new Item(2, 2, "b", false, new ItemStruct(2)),
+                                new Item(3, 3, "c", true, new ItemStruct(3)),
+                                new Item(4, 4, "d", false, new ItemStruct(4)))
+                        .forEach(session::persist);
+            });
+            getTestCommandListener().clear();
+        }
+
+        @Test
+        void groupByArithmeticWholeMatch() {
+            assertSelectionQuery(
+                    "select b.primitiveInt + 1 from Item as b GROUP BY b.primitiveInt + 1",
+                    Object.class,
+                    """
+                    {
+                      "aggregate": "Item",
+                      "pipeline": [
+                        {"$group": {"_id": {"k0": {"$add": ["$primitiveInt", 1]}}}},
+                        {"$project": {"#c_1": "$_id.k0"}}
+                      ]
+                    }
+                    """,
+                    results -> assertThat((Iterable<Integer>) results).containsExactlyInAnyOrder(2, 3, 4, 5),
+                    Set.of(COLLECTION_NAME));
+        }
+
+        @Test
+        void groupByArithmeticLeafRewriteOverColumnKey() {
+            assertSelectionQuery(
+                    "select b.primitiveInt + 1 from Item as b GROUP BY b.primitiveInt",
+                    Object.class,
+                    """
+                    {
+                      "aggregate": "Item",
+                      "pipeline": [
+                        {"$group": {"_id": {"primitiveInt": "$primitiveInt"}}},
+                        {"$project": {"#c_1": {"$add": ["$_id.primitiveInt", 1]}}}
+                      ]
+                    }
+                    """,
+                    results -> assertThat((Iterable<Integer>) results).containsExactlyInAnyOrder(2, 3, 4, 5),
+                    Set.of(COLLECTION_NAME));
+        }
+
+        @Test
+        void groupByArithmeticCompositeOverKey() {
+            assertSelectionQuery(
+                    "select (b.primitiveInt + 1) * 2 from Item as b GROUP BY b.primitiveInt + 1",
+                    Object.class,
+                    """
+                    {
+                      "aggregate": "Item",
+                      "pipeline": [
+                        {"$group": {"_id": {"k0": {"$add": ["$primitiveInt", 1]}}}},
+                        {"$project": {"#c_1": {"$multiply": ["$_id.k0", 2]}}}
+                      ]
+                    }
+                    """,
+                    results -> assertThat((Iterable<Integer>) results).containsExactlyInAnyOrder(4, 6, 8, 10),
+                    Set.of(COLLECTION_NAME));
+        }
+
+        @Test
+        void groupByArithmeticParentWinsOverLeafCanonicalization() {
+            assertSelectionQuery(
+                    "select b.primitiveInt + 1 from Item as b GROUP BY b.primitiveInt, b.primitiveInt + 1",
+                    Object.class,
+                    """
+                    {
+                      "aggregate": "Item",
+                      "pipeline": [
+                        {"$group": {"_id": {
+                          "primitiveInt": "$primitiveInt",
+                          "k1": {"$add": ["$primitiveInt", 1]}
+                        }}},
+                        {"$project": {"#c_1": "$_id.k1"}}
+                      ]
+                    }
+                    """,
+                    results -> assertThat((Iterable<Integer>) results).containsExactlyInAnyOrder(2, 3, 4, 5),
+                    Set.of(COLLECTION_NAME));
+        }
+
+        @Test
+        void groupByUnaryKey() {
+            assertSelectionQuery(
+                    "select -b.primitiveInt from Item as b GROUP BY -b.primitiveInt",
+                    Object.class,
+                    """
+                    {
+                      "aggregate": "Item",
+                      "pipeline": [
+                        {"$group": {"_id": {"k0": {"$multiply": [-1, "$primitiveInt"]}}}},
+                        {"$project": {"#c_1": "$_id.k0"}}
+                      ]
+                    }
+                    """,
+                    results -> assertThat((Iterable<Integer>) results).containsExactlyInAnyOrder(-1, -2, -3, -4),
+                    Set.of(COLLECTION_NAME));
+        }
+
+        @Test
+        void selectExpressionAndColumnGroupByBothKeys() {
+            assertSelectionQuery(
+                    "select b.primitiveInt + 1, b.primitiveInt from Item as b GROUP BY b.primitiveInt, b.primitiveInt + 1",
+                    Object[].class,
+                    """
+                    {
+                      "aggregate": "Item",
+                      "pipeline": [
+                        {"$group": {"_id": {
+                          "primitiveInt": "$primitiveInt",
+                          "k1": {"$add": ["$primitiveInt", 1]}
+                        }}},
+                        {"$project": {"#c_1": "$_id.k1", "_id#primitiveInt": "$_id.primitiveInt"}}
+                      ]
+                    }
+                    """,
+                    results -> assertThat((Iterable<Object[]>) results)
+                            .extracting(row -> List.of(row[0], row[1]))
+                            .containsExactlyInAnyOrder(List.of(2, 1), List.of(3, 2), List.of(4, 3), List.of(5, 4)),
+                    Set.of(COLLECTION_NAME));
+        }
+
+        // Documents current (unfixed) behavior for a stray column: b.primitiveInt appears in SELECT
+        // but not in GROUP BY. The rewriter has no VN match for the raw column ref, so the project
+        // spec is emitted as raw {primitiveInt: true} which references a field absent post-$group.
+        // Stray-column detection is deferred; this test locks in the current output so future work
+        // that fixes it will surface here.
+        @Test
+        void selectExpressionAndStrayColumn_currentBehavior() {
+            assertSelectionQuery(
+                    "select b.primitiveInt + 1, b.primitiveInt from Item as b GROUP BY b.primitiveInt + 1",
+                    Object[].class,
+                    """
+                    {
+                      "aggregate": "Item",
+                      "pipeline": [
+                        {"$group": {"_id": {"k0": {"$add": ["$primitiveInt", 1]}}}},
+                        {"$project": {"#c_1": "$_id.k0", "primitiveInt": true}}
+                      ]
+                    }
+                    """,
+                    results -> assertThat((Iterable<Object[]>) results)
+                            .extracting(row -> java.util.Arrays.asList(row[0], row[1]))
+                            .containsExactlyInAnyOrder(
+                                    java.util.Arrays.asList(2, null),
+                                    java.util.Arrays.asList(3, null),
+                                    java.util.Arrays.asList(4, null),
+                                    java.util.Arrays.asList(5, null)),
+                    Set.of(COLLECTION_NAME));
+        }
+
+        @Test
+        void groupByArithmeticWithHaving() {
+            assertSelectionQuery(
+                    "select b.primitiveInt + 1 from Item as b GROUP BY b.primitiveInt + 1 HAVING b.primitiveInt + 1 > 2",
+                    Object.class,
+                    /*
+                     If ExprToMatchDowngradeRule weren't wired, the emitted $match would be the $expr form: {"$match": {"$expr": {"$gt": ["$_id.k0", 2]}}}
+                    */
+                    """
+                    {
+                      "aggregate": "Item",
+                      "pipeline": [
+                        {"$group": {"_id": {"k0": {"$add": ["$primitiveInt", 1]}}}},
+                        {"$match": {"_id.k0": {"$gt": 2}}},
+                        {"$project": {"#c_1": "$_id.k0"}}
+                      ]
+                    }
+                    """,
+                    results -> assertThat((Iterable<Integer>) results).containsExactlyInAnyOrder(3, 4, 5),
+                    Set.of(COLLECTION_NAME));
+        }
+
+        @Test
+        void groupByArithmeticWithCompoundHaving() {
+            assertSelectionQuery(
+                    "select b.primitiveInt + 1 from Item as b GROUP BY b.primitiveInt + 1 "
+                            + "HAVING b.primitiveInt + 1 > 2 AND b.primitiveInt + 1 < 5",
+                    Object.class,
+                    """
+                    {
+                      "aggregate": "Item",
+                      "pipeline": [
+                        {"$group": {"_id": {"k0": {"$add": ["$primitiveInt", 1]}}}},
+                        {"$match": {"$and": [
+                          {"_id.k0": {"$gt": 2}},
+                          {"_id.k0": {"$lt": 5}}
+                        ]}},
+                        {"$project": {"#c_1": "$_id.k0"}}
+                      ]
+                    }
+                    """,
+                    results -> assertThat((Iterable<Integer>) results).containsExactlyInAnyOrder(3, 4),
+                    Set.of(COLLECTION_NAME));
         }
     }
 

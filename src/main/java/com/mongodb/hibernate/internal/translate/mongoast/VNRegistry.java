@@ -32,6 +32,16 @@ import java.util.function.ToIntFunction;
  * @hidden
  */
 @SuppressWarnings("MissingSummary")
+/*
+Name in compiler theory: Value Numbering — assigning a canonical integer ("value number") to each distinct expression structure, so two structurally-equal expressions share one number. Ours is specifically Structural Value Numbering (SVN), implemented via hash-consing — the interning technique that gives immutable values a
+*   canonical identity.
+*
+*   Roots:
+*   - Value numbering: Cocke 1970 (local, straight-line code); Alpern-Wegman-Zadeck 1988 (global VN across control-flow); Rosen-Wegman-Zadeck 1988 & Simpson 1996 (dominator-based GVN); LLVM's NewGVN today.
+*   - Hash-consing: Ershov 1958, Goto 1974 ("Monocopy and Associative Algorithms in Extended Lisp"), Filliâtre-Conchon 2006 ("Type-Safe Modular Hash-Consing") — the modern typed formulation.
+*
+*   Semantic vs structural: some GVN variants use algebraic reasoning (x+1 == 1+x, x*2 == x<<1). Ours is structural — only same-shape trees are equal. That's what PostgreSQL's GROUP BY membership check uses too, so behavior aligns.
+*/
 public final class VNRegistry {
 
     private record Key(String tag, List<Object> fields) {}
