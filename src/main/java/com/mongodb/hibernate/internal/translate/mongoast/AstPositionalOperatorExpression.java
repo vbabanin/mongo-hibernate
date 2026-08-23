@@ -16,6 +16,7 @@
 
 package com.mongodb.hibernate.internal.translate.mongoast;
 
+import java.util.ArrayList;
 import java.util.List;
 import java.util.function.Consumer;
 import org.bson.BsonWriter;
@@ -32,9 +33,9 @@ public record AstPositionalOperatorExpression(String operator, List<AstExpressio
     @Override
     public int valueNumber(VNRegistry vn) {
         return vn.memoize(this, r -> {
-            java.util.List<Object> parts = new java.util.ArrayList<>();
+            List<Object> parts = new ArrayList<>(arguments.size() + 1);
             parts.add(operator);
-            for (var arg : arguLements) {
+            for (var arg : arguments) {
                 parts.add(arg.valueNumber(r));
             }
             return r.intern("PosOp", parts.toArray());

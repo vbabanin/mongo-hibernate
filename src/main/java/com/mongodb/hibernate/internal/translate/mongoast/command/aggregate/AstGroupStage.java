@@ -42,7 +42,10 @@ import org.hibernate.sql.exec.spi.JdbcParameterBinder;
  *
  * @hidden
  */
-public record AstGroupStage(Collection<? extends AstGroupStageSpecification> specifications) implements AstStage {
+public record AstGroupStage(
+        Collection<? extends AstGroupStageSpecification> specifications,
+        Collection<? extends AstGroupStageSpecification> accumulatorSpecifications)
+        implements AstStage {
 
     public AstGroupStage {
         assertFalse(specifications.isEmpty());
@@ -61,6 +64,8 @@ public record AstGroupStage(Collection<? extends AstGroupStageSpecification> spe
                     specifications.forEach(specification -> specification.render(writer, binderConsumer));
                 }
                 writer.writeEndDocument();
+                accumulatorSpecifications.forEach(
+                        specification -> specification.render(writer, binderConsumer));
             }
             writer.writeEndDocument();
         }

@@ -62,6 +62,7 @@ import com.mongodb.hibernate.internal.FeatureNotSupportedException;
 import com.mongodb.hibernate.internal.dialect.function.ExpressionFunction;
 import com.mongodb.hibernate.internal.dialect.function.array.MongoUnnestFunction;
 import com.mongodb.hibernate.internal.service.StandardServiceRegistryScopedState;
+import com.mongodb.hibernate.internal.translate.mongoast.AstAccumulatorExpression;
 import com.mongodb.hibernate.internal.translate.mongoast.AstArithmeticExpressionOperator;
 import com.mongodb.hibernate.internal.translate.mongoast.AstBinaryOperatorExpression;
 import com.mongodb.hibernate.internal.translate.mongoast.AstComparisonExpressionOperator;
@@ -137,6 +138,7 @@ import java.util.ArrayList;
 import java.util.BitSet;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -179,6 +181,7 @@ import org.hibernate.sql.ast.tree.SqlAstNode;
 import org.hibernate.sql.ast.tree.Statement;
 import org.hibernate.sql.ast.tree.cte.CteContainer;
 import org.hibernate.sql.ast.tree.delete.DeleteStatement;
+import org.hibernate.sql.ast.tree.expression.AggregateFunctionExpression;
 import org.hibernate.sql.ast.tree.expression.AggregateColumnWriteExpression;
 import org.hibernate.sql.ast.tree.expression.Any;
 import org.hibernate.sql.ast.tree.expression.BinaryArithmeticExpression;
@@ -298,9 +301,6 @@ public abstract class AbstractMqlTranslator<T extends JdbcOperation> implements 
 
     private @Nullable GroupByContext groupByContext;
 
-    /** Post-GROUP BY rewriter over HAVING/SORT/PROJECT stages; {@code null} when the query has no GROUP BY. */
-    private @Nullable AstRewriter astRewriter;
-
     /**
      * Per-query GROUP BY state: the VN registry and the group-key-to-sub-key map. Created by {@link #createGroupStage}
      * when the query has a GROUP BY clause; {@code null} otherwise. When sub-queries are supported, this should be
@@ -309,6 +309,8 @@ public abstract class AbstractMqlTranslator<T extends JdbcOperation> implements 
     static final class GroupByContext {
         final VNRegistry vnRegistry = new VNRegistry();
         final Map<Integer, String> registeredGroupKeyByVN = new HashMap<>();
+        final LinkedHashMap<Integer, AstGroupStageSpecification> registeredAccumulatorsByVN = new LinkedHashMap<>();
+        final Set<String> accumulatorFields = new HashSet<>();
     }
 
     // Per-query counter for naming $lookup `let` variables; see nextLetVariableName.
@@ -573,30 +575,32 @@ public abstract class AbstractMqlTranslator<T extends JdbcOperation> implements 
         stages.addAll(buildJoinStages(root));
 
         createMatchStage(querySpec.getWhereClauseRestrictions()).ifPresent(stages::add);
-        var groupStage = createGroupStage(querySpec);
+        prepareGroupBy(querySpec);
 
-        if (groupStage.isPresent()) {
-            var ctx = assertNotNull(groupByContext);
-            astRewriter = new AstRewriter(
-                    List.of(new GroupBySubstitutionRule(ctx.registeredGroupKeyByVN, ctx.vnRegistry)),
+        var projectStage = createProjectStage(querySpec.getSelectClause());
+        var havingStage = createMatchStage(querySpec.getHavingClauseRestrictions());
+        var sortStage = createSortStage(querySpec);
+
+        createGroupStage().ifPresent(stages::add);
+
+        if (groupByContext != null) {
+            var ctx = groupByContext;
+            var rewriter = new AstRewriter(
+                    List.of(new GroupBySubstitutionRule(
+                            ctx.registeredGroupKeyByVN, ctx.vnRegistry, ctx.accumulatorFields)),
                     List.of(new ExprToMatchDowngradeRule()));
+            havingStage = havingStage.map(rewriter::rewrite);
+            sortStage = sortStage.map(rewriter::rewrite);
+            projectStage = rewriter.rewrite(projectStage);
         }
-        groupStage.ifPresent(stages::add);
-        createMatchStage(querySpec.getHavingClauseRestrictions())
-                .map(ms -> astRewriter != null ? astRewriter.rewrite(ms) : ms)
-                .ifPresent(stages::add);
-        createSortStage(querySpec)
-                .map(ss -> astRewriter != null ? astRewriter.rewrite(ss) : ss)
-                .ifPresent(stages::add);
+
+        havingStage.ifPresent(stages::add);
+        sortStage.ifPresent(stages::add);
 
         var skipLimitStagesAndJdbcParams =
                 assertNotNull(queryOptionsLimit).createSkipLimitStagesAndJdbcParams(querySpec);
         stages.addAll(skipLimitStagesAndJdbcParams.stages());
 
-        var projectStage = createProjectStage(querySpec.getSelectClause());
-        if (astRewriter != null) {
-            projectStage = astRewriter.rewrite(projectStage);
-        }
         stages.add(projectStage);
 
         astVisitorValueHolder.yield(
@@ -608,9 +612,11 @@ public abstract class AbstractMqlTranslator<T extends JdbcOperation> implements 
                         skipLimitStagesAndJdbcParams.limit()));
     }
 
-    private Optional<AstGroupStage> createGroupStage(final QuerySpec querySpec) {
+    private @Nullable List<AstGroupStageSpecification> pendingGroupIdSpecs;
+
+    private void prepareGroupBy(final QuerySpec querySpec) {
         if (querySpec.getGroupByClauseExpressions().isEmpty()) {
-            return Optional.empty();
+            return;
         }
         var ctx = new GroupByContext();
         groupByContext = ctx;
@@ -632,7 +638,17 @@ public abstract class AbstractMqlTranslator<T extends JdbcOperation> implements 
                 specs.add(new AstGroupStageSpecification(groupKey, expr));
             }
         }
-        return Optional.of(new AstGroupStage(specs));
+        pendingGroupIdSpecs = specs;
+    }
+
+    private Optional<AstGroupStage> createGroupStage() {
+        var specs = pendingGroupIdSpecs;
+        if (specs == null) {
+            return Optional.empty();
+        }
+        var ctx = assertNotNull(groupByContext);
+        return Optional.of(
+                new AstGroupStage(specs, List.copyOf(ctx.registeredAccumulatorsByVN.values())));
     }
 
     private Optional<AstMatchStage> createMatchStage(@Nullable Predicate restrictions) {
@@ -1550,7 +1566,9 @@ public abstract class AbstractMqlTranslator<T extends JdbcOperation> implements 
         if (selfRenderingExpression instanceof SelfRenderingFunctionSqlAstExpression<?> sqlAstExpression) {
             if (astVisitorValueHolder.expects(EXPRESSION)
                     && !(sqlAstExpression.getFunctionRenderer() instanceof ExpressionFunction)) {
-                // a function call as an operand within an aggregation expression is not yet supported
+                if (tryDispatchAccumulator(sqlAstExpression)) {
+                    return;
+                }
                 throw new FeatureNotSupportedException(
                         "TODO-HIBERNATE-196 https://jira.mongodb.org/browse/HIBERNATE-196");
             }
@@ -1558,6 +1576,29 @@ public abstract class AbstractMqlTranslator<T extends JdbcOperation> implements 
         } else {
             throw new FeatureNotSupportedException("Only function expressions are supported");
         }
+    }
+
+    private boolean tryDispatchAccumulator(SelfRenderingFunctionSqlAstExpression<?> sqlAstExpression) {
+        var ctx = groupByContext;
+        if (ctx != null
+                && sqlAstExpression instanceof AggregateFunctionExpression agg
+                && agg.getFilter() == null
+                && "sum".equalsIgnoreCase(sqlAstExpression.getFunctionName())
+                && sqlAstExpression.getArguments().size() == 1) {
+            var arg = (Expression) sqlAstExpression.getArguments().get(0);
+            var argExpr = acceptAndYieldExpression(arg);
+            var accExpr = new AstAccumulatorExpression(
+                    "$sum", new AstUnaryOperatorExpression(AstConversionExpressionOperator.TO_LONG, argExpr));
+            int vn = accExpr.valueNumber(ctx.vnRegistry);
+            var spec = ctx.registeredAccumulatorsByVN.computeIfAbsent(vn, k -> {
+                var name = "sum_" + ctx.registeredAccumulatorsByVN.size();
+                ctx.accumulatorFields.add(name);
+                return new AstGroupStageSpecification(name, accExpr);
+            });
+            astVisitorValueHolder.yield(EXPRESSION, new AstFieldPathExpression(spec.key()));
+            return true;
+        }
+        return false;
     }
 
     @Override

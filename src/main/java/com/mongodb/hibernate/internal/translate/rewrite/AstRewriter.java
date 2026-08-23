@@ -39,6 +39,7 @@ import com.mongodb.hibernate.internal.translate.mongoast.filter.AstFilter;
 import com.mongodb.hibernate.internal.translate.mongoast.filter.AstLogicalFilter;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.TreeMap;
 
 /**
  * Single walker that traverses any {@link AstNode} tree — expressions, filters, and their interleaving — applying pre-
@@ -155,14 +156,14 @@ public final class AstRewriter {
             return new AstSwitchExpression(newBranches, rewrite(s.defaultExpression()));
         }
         if (node instanceof AstLetBindingExpression let) {
-            var newVars = new java.util.TreeMap<String, AstExpression>();
+            var newVars = new TreeMap<String, AstExpression>();
             for (var e : let.vars().entrySet()) {
                 newVars.put(e.getKey(), rewrite(e.getValue()));
             }
             return new AstLetBindingExpression(rewrite(let.in()), newVars);
         }
         if (node instanceof AstNamedOperatorExpression n) {
-            var newArgs = new java.util.TreeMap<String, AstExpression>();
+            var newArgs = new TreeMap<String, AstExpression>();
             for (var e : n.arguments().entrySet()) {
                 newArgs.put(e.getKey(), rewrite(e.getValue()));
             }

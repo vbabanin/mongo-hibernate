@@ -26,6 +26,7 @@ import com.mongodb.hibernate.internal.translate.mongoast.command.aggregate.AstPr
 import com.mongodb.hibernate.internal.translate.mongoast.command.aggregate.AstSortField;
 import com.mongodb.hibernate.internal.translate.mongoast.filter.AstFieldOperationFilter;
 import java.util.Map;
+import java.util.Set;
 import org.jspecify.annotations.Nullable;
 
 /**
@@ -42,10 +43,13 @@ public final class GroupBySubstitutionRule implements RewriteRule<AstNode> {
 
     private final Map<Integer, String> groupKeyVN;
     private final VNRegistry vnRegistry;
+    private final Set<String> accumulatorFields;
 
-    public GroupBySubstitutionRule(Map<Integer, String> groupKeyVN, VNRegistry vnRegistry) {
+    public GroupBySubstitutionRule(
+            Map<Integer, String> groupKeyVN, VNRegistry vnRegistry, Set<String> accumulatorFields) {
         this.groupKeyVN = groupKeyVN;
         this.vnRegistry = vnRegistry;
+        this.accumulatorFields = accumulatorFields;
     }
 
     @Override
@@ -56,36 +60,27 @@ public final class GroupBySubstitutionRule implements RewriteRule<AstNode> {
                 return new AstFieldPathExpression("_id." + subKey);
             }
             if (expr instanceof AstFieldPathExpression fp) {
+                if (accumulatorFields.contains(fp.fieldPath())) {
+                    return null;
+                }
                 throw strayColumn(fp.fieldPath());
             }
             return null;
         }
         if (node instanceof AstFieldOperationFilter fof) {
-            String subKey = lookupByFieldPath(fof.fieldPath());
-            if (subKey == null) {
-                throw strayColumn(fof.fieldPath());
-            }
+            var subKey = requireGroupKey(fof.fieldPath());
             return new AstFieldOperationFilter("_id." + subKey, fof.filterOperation());
         }
         if (node instanceof AstSortField sf) {
-            String subKey = lookupByFieldPath(sf.path());
-            if (subKey == null) {
-                throw strayColumn(sf.path());
-            }
+            var subKey = requireGroupKey(sf.path());
             return new AstSortField("_id." + subKey, sf.order());
         }
         if (node instanceof AstProjectStageIncludeSpecification inc) {
-            String subKey = lookupByFieldPath(inc.field());
-            if (subKey == null) {
-                throw strayColumn(inc.field());
-            }
+            var subKey = requireGroupKey(inc.field());
             return new AstProjectStageFieldPathSpecification("_id#" + subKey, "_id." + subKey);
         }
         if (node instanceof AstProjectStageFieldPathSpecification fps) {
-            String subKey = lookupByFieldPath(fps.fieldPath());
-            if (subKey == null) {
-                throw strayColumn(fps.fieldPath());
-            }
+            var subKey = requireGroupKey(fps.fieldPath());
             return new AstProjectStageFieldPathSpecification("_id#" + subKey, "_id." + subKey);
         }
         return null;
@@ -97,7 +92,11 @@ public final class GroupBySubstitutionRule implements RewriteRule<AstNode> {
                 + "and is not inside an aggregate function");
     }
 
-    private @Nullable String lookupByFieldPath(String fieldPath) {
-        return groupKeyVN.get(new AstFieldPathExpression(fieldPath).valueNumber(vnRegistry));
+    private String requireGroupKey(String fieldPath) {
+        var subKey = groupKeyVN.get(new AstFieldPathExpression(fieldPath).valueNumber(vnRegistry));
+        if (subKey == null) {
+            throw strayColumn(fieldPath);
+        }
+        return subKey;
     }
 }
