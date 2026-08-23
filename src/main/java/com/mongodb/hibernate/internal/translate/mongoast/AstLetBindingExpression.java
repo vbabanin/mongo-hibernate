@@ -26,6 +26,19 @@ public record AstLetBindingExpression(AstExpression in, SortedMap<String, AstExp
         implements AstExpression {
 
     @Override
+    public int valueNumber(VNRegistry vn) {
+        return vn.memoize(this, r -> {
+            java.util.List<Object> parts = new java.util.ArrayList<>();
+            parts.add(in.valueNumber(r));
+            for (var e : vars.entrySet()) {
+                parts.add(e.getKey());
+                parts.add(e.getValue().valueNumber(r));
+            }
+            return r.intern("Let", parts.toArray());
+        });
+    }
+
+    @Override
     public void render(BsonWriter writer, Consumer<JdbcParameterBinder> binderConsumer) {
         writer.writeStartDocument();
         writer.writeName("$let");

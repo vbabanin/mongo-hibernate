@@ -29,6 +29,20 @@ import org.hibernate.sql.exec.spi.JdbcParameterBinder;
  */
 public record AstNamedOperatorExpression(String operator, SortedMap<String, AstExpression> arguments)
         implements AstExpression {
+
+    @Override
+    public int valueNumber(VNRegistry vn) {
+        return vn.memoize(this, r -> {
+            java.util.List<Object> parts = new java.util.ArrayList<>();
+            parts.add(operator);
+            for (var e : arguments.entrySet()) {
+                parts.add(e.getKey());
+                parts.add(e.getValue().valueNumber(r));
+            }
+            return r.intern("NamedOp", parts.toArray());
+        });
+    }
+
     @Override
     public void render(BsonWriter writer, Consumer<JdbcParameterBinder> binderConsumer) {
         writer.writeStartDocument();

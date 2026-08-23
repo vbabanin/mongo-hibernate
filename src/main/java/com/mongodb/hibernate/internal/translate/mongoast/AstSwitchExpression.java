@@ -32,6 +32,20 @@ import org.hibernate.sql.exec.spi.JdbcParameterBinder;
 @SuppressWarnings("MissingSummary")
 public record AstSwitchExpression(List<AstSwitchCase> branches, AstExpression defaultExpression)
         implements AstExpression {
+
+    @Override
+    public int valueNumber(VNRegistry vn) {
+        return vn.memoize(this, r -> {
+            java.util.List<Object> parts = new java.util.ArrayList<>();
+            for (var b : branches) {
+                parts.add(b.caseExpression().valueNumber(r));
+                parts.add(b.thenExpression().valueNumber(r));
+            }
+            parts.add(defaultExpression.valueNumber(r));
+            return r.intern("Switch", parts.toArray());
+        });
+    }
+
     @Override
     public void render(BsonWriter writer, Consumer<JdbcParameterBinder> binderConsumer) {
         writer.writeStartDocument();

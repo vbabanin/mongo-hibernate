@@ -28,6 +28,19 @@ import org.hibernate.sql.exec.spi.JdbcParameterBinder;
  * @param arguments a list of arguments that will be converted into an array
  */
 public record AstPositionalOperatorExpression(String operator, List<AstExpression> arguments) implements AstExpression {
+
+    @Override
+    public int valueNumber(VNRegistry vn) {
+        return vn.memoize(this, r -> {
+            java.util.List<Object> parts = new java.util.ArrayList<>();
+            parts.add(operator);
+            for (var arg : arguLements) {
+                parts.add(arg.valueNumber(r));
+            }
+            return r.intern("PosOp", parts.toArray());
+        });
+    }
+
     @Override
     public void render(BsonWriter writer, Consumer<JdbcParameterBinder> binderConsumer) {
         writer.writeStartDocument();

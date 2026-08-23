@@ -16,7 +16,9 @@
 
 package com.mongodb.hibernate.internal.translate.mongoast;
 
+import java.util.function.Consumer;
 import org.bson.BsonWriter;
+import org.hibernate.sql.exec.spi.JdbcParameterBinder;
 
 /**
  * Adapts an {@link AstExpression} into value position — used when an aggregation-expression subtree (e.g. an arithmetic
@@ -24,7 +26,7 @@ import org.bson.BsonWriter;
  */
 public record AstExpressionValue(AstExpression expression) implements AstValue {
     @Override
-    public void render(BsonWriter writer) {
-        expression.render(writer);
+    public void render(BsonWriter writer, Consumer<JdbcParameterBinder> binderConsumer) {
+        expression.render(writer, binderConsumer);
     }
 }

@@ -27,9 +27,13 @@ public sealed interface AstExpression extends AstNode
         permits AstBinaryOperatorExpression,
                 AstFieldPathExpression,
                 AstInExpression,
+                AstLetBindingExpression,
                 AstLiteralExpression,
                 AstLogicalOperatorExpression,
+                AstNamedOperatorExpression,
+                AstPositionalOperatorExpression,
                 AstRegexMatchExpression,
+                AstSwitchExpression,
                 AstUnaryOperatorExpression,
                 AstValueExpression,
                 AstVariableExpression {
